@@ -1,15 +1,15 @@
-name: AI HOT Daily Sync
+name: AI HOT All Sync
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 1 * * *"
+    - cron: "30 1 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: aihot-daily-sync
+  group: aihot-all-sync
   cancel-in-progress: false
 
 jobs:
@@ -18,7 +18,9 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUNBUFFERED: "1"
-      AIHOT_SOURCE_MODE: daily
+      AIHOT_SOURCE_MODE: all
+      AIHOT_LOOKBACK_DAYS: "1"
+      AIHOT_MAX_ITEMS: "20"
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
       VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
@@ -56,7 +58,7 @@ jobs:
           print("Required GitHub Actions secrets are configured.")
           PY
 
-      - name: Generate AI HOT daily page
+      - name: Generate AI HOT all-items page
         run: python ./sources/daily_paper.py
 
       - name: Sync to Notion

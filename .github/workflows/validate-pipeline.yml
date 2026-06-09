@@ -16,6 +16,7 @@ jobs:
     timeout-minutes: 10
     env:
       PYTHONUNBUFFERED: "1"
+      AIHOT_OFFLINE_MODE: "1"
 
     steps:
       - name: Checkout repository
@@ -32,7 +33,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Compile Python scripts
-        run: python -m py_compile sync_to_notion.py sources/daily_paper.py
+        run: python -m py_compile sync_to_notion.py sources/daily_paper.py sources/aihot_client.py
 
       - name: Generate sample markdown
         run: python ./sources/daily_paper.py
@@ -42,9 +43,9 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          generated_files = sorted(Path("output").glob("*-daily-paper.md"))
-          if not generated_files:
-              raise SystemExit("No markdown file was generated in output/.")
+          generated_files = sorted(Path("output").glob("*-aihot-*.md"))
+          if len(generated_files) != 1:
+              raise SystemExit(f"Expected 1 generated markdown file, got {len(generated_files)}.")
 
-          print(f"Verified generated file: {generated_files[-1]}")
+          print(f"Verified generated file: {generated_files[0]}")
           PY

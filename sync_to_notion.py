@@ -19,7 +19,7 @@ def ensure_env() -> None:
         missing.append("NOTION_DATABASE_ID")
 
     if missing:
-        raise RuntimeError(f"缺少环境变量: {', '.join(missing)}")
+        raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
 
 
 def normalize_date(value) -> str:
@@ -39,11 +39,23 @@ def make_slug(title: str, date_str: str) -> str:
     return normalized or f"ai-daily-{date_str}"
 
 
+def build_rich_text(content: str) -> list[dict]:
+    return [{"type": "text", "text": {"content": content[:2000]}}]
+
+
+def build_block(block_type: str, content: str) -> dict:
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": build_rich_text(content)},
+    }
+
+
 def get_data_source_id(notion: Client) -> str:
     database = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
     data_sources = database.get("data_sources", [])
     if not data_sources:
-        raise RuntimeError("未找到 data source，请确认这是原始数据库而不是链接视图。")
+        raise RuntimeError("No data source found. Make sure the target is the original database view.")
     return data_sources[0]["id"]
 
 
@@ -54,39 +66,28 @@ def build_children(markdown_content: str) -> list[dict]:
         if not line:
             continue
 
+        if line.startswith("### "):
+            children.append(build_block("heading_3", line[4:]))
+            continue
+
+        if line.startswith("## "):
+            children.append(build_block("heading_2", line[3:]))
+            continue
+
         if line.startswith("# "):
-            children.append(
-                {
-                    "object": "block",
-                    "type": "heading_1",
-                    "heading_1": {
-                        "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
-                    },
-                }
-            )
+            children.append(build_block("heading_1", line[2:]))
+            continue
+
+        if re.match(r"^\d+\.\s+", line):
+            content = re.sub(r"^\d+\.\s+", "", line)
+            children.append(build_block("numbered_list_item", content))
             continue
 
         if line.startswith("- "):
-            children.append(
-                {
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": {
-                        "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
-                    },
-                }
-            )
+            children.append(build_block("bulleted_list_item", line[2:]))
             continue
 
-        children.append(
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": line}}]
-                },
-            }
-        )
+        children.append(build_block("paragraph", line))
 
     return children[:100]
 
@@ -131,8 +132,8 @@ def sync_markdown_to_notion(notion: Client, file_path: Path) -> None:
     data_source_id = get_data_source_id(notion)
     post = frontmatter.loads(file_path.read_text(encoding="utf-8"))
 
-    title = post.get("title", "无标题")
-    summary = post.get("summary", "今日 AI 内容摘要")
+    title = post.get("title", "Untitled")
+    summary = post.get("summary", "AI content summary")
     date_str = normalize_date(post.get("date"))
     tags = post.get("tags", [])
     category = post.get("category", "AI日报")
@@ -141,11 +142,11 @@ def sync_markdown_to_notion(notion: Client, file_path: Path) -> None:
 
     existing = find_existing_page(notion, data_source_id, title)
     if existing:
-        print(f"跳过已存在页面: {title}")
+        print(f"Skipping existing page: {title}")
         return
 
     create_page(notion, data_source_id, title, summary, date_str, tags, category, slug, children)
-    print(f"创建新页面: {title}")
+    print(f"Created page: {title}")
 
 
 def main() -> None:
@@ -154,18 +155,18 @@ def main() -> None:
 
     output_dir = Path(__file__).resolve().parent / "output"
     if not output_dir.exists():
-        raise RuntimeError(f"输出目录不存在: {output_dir}")
+        raise RuntimeError(f"Output directory does not exist: {output_dir}")
 
     files = sorted(output_dir.glob("*.md"))
     if not files:
-        print("output 目录中没有可同步的 Markdown 文件。")
+        print("No Markdown files found in output/.")
         return
 
     for file_path in files:
         try:
             sync_markdown_to_notion(notion, file_path)
         except Exception as exc:
-            print(f"同步失败 {file_path.name}: {exc}")
+            print(f"Failed to sync {file_path.name}: {exc}")
 
 
 if __name__ == "__main__":
