@@ -18,6 +18,9 @@ jobs:
     timeout-minutes: 15
     env:
       PYTHONUNBUFFERED: "1"
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
 
     steps:
       - name: Checkout repository
@@ -34,9 +37,6 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Validate GitHub Secrets
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
           python - <<'PY'
           import os
@@ -59,19 +59,14 @@ jobs:
         run: python ./sources/daily_paper.py
 
       - name: Sync to Notion
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: python ./sync_to_notion.py
 
       - name: Trigger Vercel deploy
-        if: ${{ success() && secrets.VERCEL_DEPLOY_HOOK_URL != '' }}
-        env:
-          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        if: ${{ success() && env.VERCEL_DEPLOY_HOOK_URL != '' }}
         run: |
           curl -fsS -X POST "$VERCEL_DEPLOY_HOOK_URL"
           echo "Vercel Deploy Hook triggered successfully."
 
       - name: Skip Vercel deploy when hook is missing
-        if: ${{ success() && secrets.VERCEL_DEPLOY_HOOK_URL == '' }}
+        if: ${{ success() && env.VERCEL_DEPLOY_HOOK_URL == '' }}
         run: echo "VERCEL_DEPLOY_HOOK_URL is not configured, skipping Vercel redeploy."
