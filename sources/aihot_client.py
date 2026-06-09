@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -11,7 +12,11 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_BASE_URL = "https://aihot.virxact.com"
 DEFAULT_TIMEZONE = "Asia/Shanghai"
-DEFAULT_USER_AGENT = "xz-ai-daily/1.0 (+https://github.com/pxz-ooo/xz-ai-daily)"
+# AI HOT blocks the default curl UA; use a normal browser-like UA by default.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 @dataclass
@@ -49,25 +54,24 @@ def use_offline_sample() -> bool:
     return os.environ.get("AIHOT_OFFLINE_MODE", "").strip() == "1"
 
 
+def debug_enabled() -> bool:
+    return os.environ.get("AIHOT_DEBUG", "").strip() == "1"
+
+
 def get_max_items() -> int:
     raw_value = os.environ.get("AIHOT_MAX_ITEMS", "12").strip() or "12"
-    return max(1, min(int(raw_value), 30))
+    return max(1, min(int(raw_value), 100))
 
 
 def get_lookback_days() -> int:
     raw_value = os.environ.get("AIHOT_LOOKBACK_DAYS", "3").strip() or "3"
-    return max(1, min(int(raw_value), 30))
-
-
-def unwrap_data(payload: Any) -> Any:
-    if isinstance(payload, dict) and payload.get("data") is not None:
-        return payload["data"]
-    return payload
+    return max(1, min(int(raw_value), 7))
 
 
 def fetch_json(path: str, params: dict[str, str] | None = None) -> Any:
     query = f"?{urlencode(params)}" if params else ""
     url = f"{get_base_url()}{path}{query}"
+    debug_log(f"request url={url}")
     request = Request(
         url,
         headers={
@@ -78,7 +82,9 @@ def fetch_json(path: str, params: dict[str, str] | None = None) -> Any:
 
     try:
         with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
+            payload = json.loads(response.read().decode("utf-8"))
+            debug_log(f"response keys={list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__}")
+            return payload
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"AI HOT API request failed {exc.code}: {body or exc.reason}") from exc
@@ -103,63 +109,88 @@ def normalize_list(value: Any) -> list[Any]:
     return [value]
 
 
+def append_if(lines: list[str], text: str) -> None:
+    if text:
+        lines.append(text)
+
+
+def debug_log(message: str) -> None:
+    if debug_enabled():
+        print(f"[AIHOT_DEBUG] {message}", file=sys.stderr)
+
+
 def parse_daily_payload(payload: Any) -> DailyDigest:
-    data = unwrap_data(payload)
-    if isinstance(data, list):
-        if not data:
-            raise RuntimeError("AI HOT daily endpoint returned an empty list.")
-        data = data[0]
-    if not isinstance(data, dict):
+    if not isinstance(payload, dict):
         raise RuntimeError("AI HOT daily endpoint returned an unexpected payload.")
 
-    date_str = normalize_text(data.get("date"), get_today_str())
-    title = normalize_text(data.get("title") or data.get("headline"), f"AI HOT 日报 {date_str}")
-    summary = normalize_text(
-        data.get("summary") or data.get("description"),
-        "来自 AI HOT 的每日精编日报。",
+    date_str = normalize_text(payload.get("date"), get_today_str())
+    lead = payload.get("lead") if isinstance(payload.get("lead"), dict) else {}
+    lead_title = normalize_text(lead.get("title"))
+    lead_paragraph = normalize_text(lead.get("leadParagraph"))
+    debug_log(
+        "daily schema "
+        f"date={date_str} "
+        f"has_lead={bool(lead)} "
+        f"sections={len(normalize_list(payload.get('sections')))} "
+        f"flashes={len(normalize_list(payload.get('flashes')))}"
     )
 
-    markdown_body = normalize_text(data.get("markdown") or data.get("content") or data.get("body"))
-    if markdown_body:
-        return DailyDigest(
-            title=title,
-            summary=summary,
-            date_str=date_str,
-            markdown_body=markdown_body,
-            tags=["AI HOT", "日报", "精选"],
-            category="AI日报",
-            slug_suffix="daily",
-        )
+    title = f"AI HOT 日报 {date_str}"
+    summary = lead_paragraph or "来自 AI HOT 的每日精编日报。"
 
-    sections = normalize_list(data.get("sections") or data.get("highlights") or data.get("items"))
-    if not sections:
-        raise RuntimeError("AI HOT daily endpoint did not return any usable content.")
-
-    lines = [f"# {title}", "", summary, ""]
-    for section in sections[: get_max_items()]:
-        if isinstance(section, str):
-            lines.append(f"- {section.strip()}")
-            continue
-
-        if not isinstance(section, dict):
-            continue
-
-        item_title = normalize_text(section.get("title"), "未命名条目")
-        item_summary = normalize_text(section.get("summary") or section.get("description"))
-        item_url = normalize_text(section.get("url") or section.get("link"))
-
-        lines.append(f"## {item_title}")
-        if item_summary:
-            lines.append(item_summary)
-        if item_url:
-            lines.append(f"原文链接：{item_url}")
+    lines = [f"# {title}", ""]
+    if lead_title:
+        lines.append(f"## 今日导读")
+        lines.append(lead_title)
+        lines.append("")
+    if lead_paragraph:
+        lines.append(lead_paragraph)
         lines.append("")
 
+    sections = [section for section in normalize_list(payload.get("sections")) if isinstance(section, dict)]
+    for section in sections:
+        label = normalize_text(section.get("label"))
+        items = [item for item in normalize_list(section.get("items")) if isinstance(item, dict)]
+        debug_log(f"daily section label={label or '(empty)'} items={len(items)}")
+        if not label and not items:
+            continue
+
+        append_if(lines, f"## {label}" if label else "## 精选条目")
+        for item in items[: get_max_items()]:
+            item_title = normalize_text(item.get("title"), "未命名条目")
+            item_summary = normalize_text(item.get("summary"))
+            source_name = normalize_text(item.get("sourceName"))
+            source_url = normalize_text(item.get("sourceUrl"))
+
+            lines.append(f"### {item_title}")
+            append_if(lines, item_summary)
+            if source_name or source_url:
+                meta = source_name if source_name and not source_url else f"{source_name} | {source_url}" if source_name else source_url
+                append_if(lines, f"来源：{meta}")
+            lines.append("")
+
+    flashes = [flash for flash in normalize_list(payload.get("flashes")) if isinstance(flash, dict)]
+    if flashes:
+        debug_log(f"daily flashes count={len(flashes)}")
+        lines.append("## 快讯")
+        for flash in flashes[: get_max_items()]:
+            flash_title = normalize_text(flash.get("title"), "未命名快讯")
+            source_name = normalize_text(flash.get("sourceName"))
+            source_url = normalize_text(flash.get("sourceUrl"))
+            published_at = normalize_text(flash.get("publishedAt"))
+
+            bullet = flash_title
+            meta_parts = [part for part in [source_name, published_at, source_url] if part]
+            if meta_parts:
+                bullet = f"{bullet} ({' | '.join(meta_parts)})"
+            lines.append(f"- {bullet}")
+
+    markdown_body = "\n".join(lines).strip()
     return DailyDigest(
         title=title,
         summary=summary,
         date_str=date_str,
-        markdown_body="\n".join(lines).strip(),
+        markdown_body=markdown_body,
         tags=["AI HOT", "日报", "精选"],
         category="AI日报",
         slug_suffix="daily",
@@ -167,22 +198,25 @@ def parse_daily_payload(payload: Any) -> DailyDigest:
 
 
 def extract_items(payload: Any) -> list[dict[str, Any]]:
-    data = unwrap_data(payload)
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        items = (
-            normalize_list(data.get("items"))
-            or normalize_list(data.get("results"))
-            or normalize_list(data.get("list"))
-        )
-    else:
-        items = []
-
-    normalized_items = [item for item in items if isinstance(item, dict)]
-    if not normalized_items:
+    if not isinstance(payload, dict):
+        raise RuntimeError("AI HOT items endpoint returned an unexpected payload.")
+    items = [item for item in normalize_list(payload.get("items")) if isinstance(item, dict)]
+    debug_log(
+        "items schema "
+        f"count={payload.get('count')} "
+        f"hasNext={payload.get('hasNext')} "
+        f"nextCursor={payload.get('nextCursor')}"
+    )
+    if not items:
         raise RuntimeError("AI HOT items endpoint did not return any usable items.")
-    return normalized_items
+    first = items[0]
+    debug_log(
+        "items first "
+        f"id={normalize_text(first.get('id'))} "
+        f"title={normalize_text(first.get('title'))} "
+        f"category={normalize_text(first.get('category'))}"
+    )
+    return items
 
 
 def parse_items_payload(payload: Any, mode: str) -> DailyDigest:
@@ -194,20 +228,24 @@ def parse_items_payload(payload: Any, mode: str) -> DailyDigest:
     lines = [f"# AI HOT {mode_label} - {date_str}", "", summary, ""]
     for item in items[: get_max_items()]:
         title = normalize_text(item.get("title"), "未命名条目")
-        item_summary = normalize_text(item.get("summary") or item.get("description"))
-        category = normalize_text(item.get("category") or item.get("type"))
-        source = normalize_text(item.get("source") or item.get("site_name"))
-        item_url = normalize_text(item.get("url") or item.get("link"))
-        published_at = normalize_text(item.get("published_at") or item.get("date"))
+        item_summary = normalize_text(item.get("summary"))
+        category = normalize_text(item.get("category"))
+        source = normalize_text(item.get("source"))
+        item_url = normalize_text(item.get("url"))
+        published_at = normalize_text(item.get("publishedAt"))
+        score = item.get("score")
+        selected = item.get("selected")
 
-        meta_parts = [part for part in [category, source, published_at] if part]
         lines.append(f"## {title}")
+        meta_parts = [part for part in [category, source, published_at] if part]
+        if score is not None:
+            meta_parts.append(f"score={score}")
+        if selected is not None:
+            meta_parts.append("selected=true" if selected else "selected=false")
         if meta_parts:
             lines.append(f"信息：{' | '.join(meta_parts)}")
-        if item_summary:
-            lines.append(item_summary)
-        if item_url:
-            lines.append(f"原文链接：{item_url}")
+        append_if(lines, item_summary)
+        append_if(lines, f"原文链接：{item_url}" if item_url else "")
         lines.append("")
 
     return DailyDigest(
@@ -230,25 +268,29 @@ def build_since_iso() -> str:
 def build_offline_sample() -> DailyDigest:
     mode = get_mode()
     date_str = get_today_str()
+
     if mode == "all":
         title = f"AI HOT 全量动态 {date_str}"
         summary = "AI HOT 离线全量动态示例数据，用于本地或 CI 校验。"
-        body_lines = [
-            f"# {title}",
-            "",
-            summary,
-            "",
-            "## 动态流示例",
-            "",
-            "- OpenAI 发布新模型与 API 能力更新",
-            "- Anthropic 分享企业级 Agent 实践",
-            "- 多模态与视频生成赛道持续升温",
-        ]
+        markdown_body = f"""# {title}
+
+{summary}
+
+## OpenAI 发布新模型
+信息：ai-models | OpenAI Blog | 2026-06-09T08:00:00.000Z | score=88 | selected=true
+模型与 API 能力同步升级。
+原文链接：https://openai.com/
+
+## Anthropic 更新 Claude
+信息：ai-models | Anthropic Blog | 2026-06-09T07:00:00.000Z | score=82 | selected=false
+企业级 Agent 实践继续推进。
+原文链接：https://www.anthropic.com/
+"""
         return DailyDigest(
             title=title,
             summary=summary,
             date_str=date_str,
-            markdown_body="\n".join(body_lines),
+            markdown_body=markdown_body,
             tags=["AI HOT", "动态", "离线示例"],
             category="AI动态",
             slug_suffix="sample-all",
@@ -258,13 +300,18 @@ def build_offline_sample() -> DailyDigest:
     summary = "AI HOT 离线日报示例数据，用于本地或 CI 校验。"
     markdown_body = f"""# {title}
 
+## 今日导读
+OpenAI / Anthropic / Google 持续更新模型与产品能力
+
 {summary}
 
-## 今日精编
+## 模型发布/更新
+### OpenAI 发布新模型
+模型与 API 能力同步升级。
+来源：OpenAI Blog | https://openai.com/
 
-- OpenAI 发布新模型与 API 能力更新
-- Anthropic 分享企业级 Agent 实践
-- 多模态与视频生成赛道持续升温
+## 快讯
+- Anthropic 更新 Claude (Anthropic Blog | 2026-06-09T07:00:00.000Z | https://www.anthropic.com/)
 """
     return DailyDigest(
         title=title,
