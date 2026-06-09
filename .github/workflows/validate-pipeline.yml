@@ -1,0 +1,50 @@
+name: Validate Pipeline
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile Python scripts
+        run: python -m py_compile sync_to_notion.py sources/daily_paper.py
+
+      - name: Generate sample markdown
+        run: python ./sources/daily_paper.py
+
+      - name: Verify generated output
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          generated_files = sorted(Path("output").glob("*-daily-paper.md"))
+          if not generated_files:
+              raise SystemExit("No markdown file was generated in output/.")
+
+          print(f"Verified generated file: {generated_files[-1]}")
+          PY
